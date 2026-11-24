@@ -30,6 +30,7 @@ appsettings.*.local.json
 .env.*
 
 # Logs and OS noise
+logs/
 *.log
 .DS_Store
 Thumbs.db

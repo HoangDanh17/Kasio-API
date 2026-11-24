@@ -25,12 +25,10 @@ DOMAIN := src/$(PROJECT).Domain
 CONTRACTS := src/$(PROJECT).Contracts
 APPLICATION := src/$(PROJECT).Application
 PERSISTENCE := src/$(PROJECT).Infrastructure.Persistence
-QUERY := src/$(PROJECT).Infrastructure.Persistence.Query
+READ_MODEL := src/$(PROJECT).Infrastructure.Persistence.ReadModel
 CACHE := src/$(PROJECT).Infrastructure.Cache
-HEALTH := src/$(PROJECT).Infrastructure.Health
 API := host/$(PROJECT).Api
 TESTS := tests/$(PROJECT).UnitTests
-INTEGRATION_TESTS := tests/$(PROJECT).IntegrationTests
 SLN := $(PROJECT).sln
 
 PROJECTS := \
@@ -39,19 +37,47 @@ PROJECTS := \
 	$(CONTRACTS)/$(PROJECT).Contracts.csproj \
 	$(DOMAIN)/$(PROJECT).Domain.csproj \
 	$(PERSISTENCE)/$(PROJECT).Infrastructure.Persistence.csproj \
-	$(QUERY)/$(PROJECT).Infrastructure.Persistence.Query.csproj \
+	$(READ_MODEL)/$(PROJECT).Infrastructure.Persistence.ReadModel.csproj \
 	$(CACHE)/$(PROJECT).Infrastructure.Cache.csproj \
-	$(HEALTH)/$(PROJECT).Infrastructure.Health.csproj \
-	$(TESTS)/$(PROJECT).UnitTests.csproj \
-	$(INTEGRATION_TESTS)/$(PROJECT).IntegrationTests.csproj
+	$(TESTS)/$(PROJECT).UnitTests.csproj
 
 define GITIGNORE :=
+# Build output
 bin/
 obj/
+artifacts/
+[Dd]ebug/
+[Rr]elease/
+*.trx
 TestResults/
-*.user
-.vs/
+*.coverage
+*.coveragexml
+
+# IDE
 .idea/
+.vs/
+.vscode/
+*.user
+*.suo
+*.DotSettings.user
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+
+# Local overrides and secrets
+appsettings.*.local.json
+*.pfx
+*.snk
+.env
+.env.*
+
+# Logs and OS noise
+logs/
+*.log
+.DS_Store
+Thumbs.db
 endef
 
 define BUILD_PROPS :=
@@ -60,9 +86,90 @@ define BUILD_PROPS :=
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <LangVersion>latest</LangVersion>
+    <LangVersion>14.0</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <ContinuousIntegrationBuild Condition="'$$(CI)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Meziantou.Analyzer" Version="3.0.342" PrivateAssets="all" />
+  </ItemGroup>
 </Project>
+endef
+
+define EDITORCONFIG :=
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{csproj,props,targets,json,yml,yaml,xml,sln}]
+indent_size = 2
+
+[*.cs]
+dotnet_sort_system_directives_first = true
+csharp_style_namespace_declarations = file_scoped:warning
+dotnet_style_qualification_for_field = false:silent
+dotnet_style_qualification_for_property = false:silent
+dotnet_style_qualification_for_method = false:silent
+dotnet_style_qualification_for_event = false:silent
+endef
+
+define GLOBAL_JSON :=
+{
+  "sdk": {
+    "version": "10.0.100",
+    "rollForward": "latestFeature",
+    "allowPrerelease": false
+  }
+}
+endef
+
+define ARCHITECTURE_DOC :=
+# Architecture rules
+
+## Dependency direction
+
+- `Domain` depends on nothing.
+- `Application` depends on `Domain` only. It owns commands, queries, handlers,
+  validators, internal DTOs and Mapperly mappers. It must NOT reference `Contracts`.
+- `Contracts` holds the public API surface (request/response DTOs) and depends on nothing.
+- `Api` depends on `Application`, `Contracts`, `Persistence`, `Persistence.ReadModel`,
+  `Cache`, maps Application results to Contracts DTOs (Mapperly) and owns transport concerns
+  (ProblemDetails, auth, health, OpenAPI).
+
+Do not add `Application` to `Contracts` references: Contracts is the public contract;
+changing it is a breaking change for consumers.
+
+## Storage
+
+- `Persistence` = write model: EF Core on PostgreSQL, migrations via `dotnet ef`.
+- `Persistence.ReadModel` = read model: MongoDB via the driver, no EF.
+  Bootstrap collections with code-first `$$jsonSchema` validators plus indexes; see
+  README of that project when the first read model lands.
+- `Cache` wraps `IDistributedCache` over Redis with a fixed `InstanceName`.
+
+## Configuration
+
+- `appsettings.json` contains no credentials and no endpoints.
+- Local values live in `appsettings.Development.json`; production values come from
+  environment variables (`ConnectionStrings__WriteDb`, `Mongo__ConnectionString`,
+  `Jwt__SigningKey`, ...). A missing required value fails startup with
+  `InvalidOperationException` - never a silent fallback.
+
+## Errors
+
+- Application handlers return `ErrorOr<T>`; validation failures come from the
+  FluentValidation pipeline behavior and become HTTP 400 ProblemDetails in the API.
+- Unexpected exceptions become HTTP 500 ProblemDetails (`AddProblemDetails`).
 endef
 
 define DOMAIN_CSPROJ :=
@@ -77,13 +184,14 @@ define APPLICATION_CSPROJ :=
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="../$(PROJECT).Domain/$(PROJECT).Domain.csproj" />
-    <ProjectReference Include="../$(PROJECT).Contracts/$(PROJECT).Contracts.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="MediatR" Version="12.5.0" />
     <PackageReference Include="FluentValidation" Version="12.2.0" />
     <PackageReference Include="FluentValidation.DependencyInjectionExtensions" Version="12.2.0" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.15" />
+    <PackageReference Include="ErrorOr" Version="2.1.1" />
+    <PackageReference Include="Riok.Mapperly" Version="4.3.1" PrivateAssets="all" />
   </ItemGroup>
 </Project>
 endef
@@ -128,12 +236,13 @@ public sealed class ValidationBehavior<TRequest, TResponse>(IEnumerable<IValidat
     {
         if (!validators.Any())
         {
-            return await next(cancellationToken);
+            return await next(cancellationToken).ConfigureAwait(false);
         }
 
         var context = new ValidationContext<TRequest>(request);
-        var results = await Task.WhenAll(
-            validators.Select(validator => validator.ValidateAsync(context, cancellationToken)));
+        var results = await Task
+            .WhenAll(validators.Select(validator => validator.ValidateAsync(context, cancellationToken)))
+            .ConfigureAwait(false);
         var failures = results.SelectMany(result => result.Errors).ToList();
 
         if (failures.Count != 0)
@@ -141,7 +250,7 @@ public sealed class ValidationBehavior<TRequest, TResponse>(IEnumerable<IValidat
             throw new ValidationException(failures);
         }
 
-        return await next(cancellationToken);
+        return await next(cancellationToken).ConfigureAwait(false);
     }
 }
 endef
@@ -154,6 +263,7 @@ define PERSISTENCE_CSPROJ :=
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.15" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.4" />
+    <PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.15" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.15" />
   </ItemGroup>
@@ -174,7 +284,9 @@ public static class DependencyInjection
         var connectionString = configuration.GetConnectionString("WriteDb")
             ?? throw new InvalidOperationException("Connection string 'WriteDb' is not configured.");
 
-        services.AddDbContext<$(PROJECT)DbContext>(options => options.UseNpgsql(connectionString));
+        services.AddDbContext<$(PROJECT)DbContext>(options => options
+            .UseNpgsql(connectionString, npgsql => npgsql.EnableRetryOnFailure())
+            .UseSnakeCaseNamingConvention());
 
         return services;
     }
@@ -186,12 +298,17 @@ using Microsoft.EntityFrameworkCore;
 
 namespace $(PROJECT).Infrastructure.Persistence;
 
-public sealed class $(PROJECT)DbContext(DbContextOptions<$(PROJECT)DbContext> options) : DbContext(options)
+public class $(PROJECT)DbContext(DbContextOptions<$(PROJECT)DbContext> options) : DbContext(options)
 {
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.ApplyConfigurationsFromAssembly(typeof($(PROJECT)DbContext).Assembly);
+    }
 }
 endef
 
-define QUERY_CSPROJ :=
+define READ_MODEL_CSPROJ :=
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="../$(PROJECT).Application/$(PROJECT).Application.csproj" />
@@ -204,20 +321,21 @@ define QUERY_CSPROJ :=
 </Project>
 endef
 
-define QUERY_DI :=
+define READ_MODEL_DI :=
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MongoDB.Driver;
 
-namespace $(PROJECT).Infrastructure.Persistence.Query;
+namespace $(PROJECT).Infrastructure.Persistence.ReadModel;
 
 public static class DependencyInjection
 {
-    public static IServiceCollection AddQuery(this IServiceCollection services, IConfiguration configuration)
+    public static IServiceCollection AddReadModel(this IServiceCollection services, IConfiguration configuration)
     {
-        var connectionString = configuration.GetConnectionString("ReadDb")
-            ?? throw new InvalidOperationException("Connection string 'ReadDb' is not configured.");
-        var databaseName = configuration["ReadDb:Database"] ?? "kasio-read";
+        var connectionString = configuration["Mongo:ConnectionString"]
+            ?? throw new InvalidOperationException("Configuration 'Mongo:ConnectionString' is not set.");
+        var databaseName = configuration["Mongo:Database"]
+            ?? throw new InvalidOperationException("Configuration 'Mongo:Database' is not set.");
 
         services.AddSingleton<IMongoClient>(_ => new MongoClient(connectionString));
         services.AddSingleton(provider => provider.GetRequiredService<IMongoClient>().GetDatabase(databaseName));
@@ -233,7 +351,7 @@ define CACHE_CSPROJ :=
     <ProjectReference Include="../$(PROJECT).Application/$(PROJECT).Application.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="StackExchange.Redis" Version="2.13.23" />
+    <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="10.0.15" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.15" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.15" />
   </ItemGroup>
@@ -243,7 +361,6 @@ endef
 define CACHE_DI :=
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using StackExchange.Redis;
 
 namespace $(PROJECT).Infrastructure.Cache;
 
@@ -254,52 +371,14 @@ public static class DependencyInjection
         var connectionString = configuration.GetConnectionString("Redis")
             ?? throw new InvalidOperationException("Connection string 'Redis' is not configured.");
 
-        services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(connectionString));
+        var instanceName = configuration["Redis:InstanceName"]
+            ?? throw new InvalidOperationException("Configuration 'Redis:InstanceName' is not set.");
 
-        return services;
-    }
-}
-endef
-
-define HEALTH_CSPROJ :=
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <PackageReference Include="AspNetCore.HealthChecks.MongoDb" Version="9.0.0" />
-    <PackageReference Include="AspNetCore.HealthChecks.NpgSql" Version="9.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.15" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.15" />
-  </ItemGroup>
-</Project>
-endef
-
-define HEALTH_DI :=
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using MongoDB.Driver;
-
-namespace $(PROJECT).Infrastructure.Health;
-
-public static class DependencyInjection
-{
-    public static IServiceCollection AddPlatformHealthChecks(
-        this IServiceCollection services,
-        IConfiguration configuration)
-    {
-        var writeDb = configuration.GetConnectionString("WriteDb")
-            ?? throw new InvalidOperationException("Connection string 'WriteDb' is not configured.");
-
-        services.AddHealthChecks()
-            .AddNpgSql(
-                writeDb,
-                name: "postgres",
-                tags: ["ready"],
-                timeout: TimeSpan.FromSeconds(2))
-            .AddMongoDb(
-                provider => provider.GetRequiredService<IMongoDatabase>(),
-                name: "mongodb",
-                tags: ["ready"],
-                timeout: TimeSpan.FromSeconds(2));
+        services.AddStackExchangeRedisCache(options =>
+        {
+            options.Configuration = connectionString;
+            options.InstanceName = instanceName;
+        });
 
         return services;
     }
@@ -310,13 +389,21 @@ define API_CSPROJ :=
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <ItemGroup>
     <ProjectReference Include="../../$(APPLICATION)/$(PROJECT).Application.csproj" />
+    <ProjectReference Include="../../$(CONTRACTS)/$(PROJECT).Contracts.csproj" />
     <ProjectReference Include="../../$(PERSISTENCE)/$(PROJECT).Infrastructure.Persistence.csproj" />
-    <ProjectReference Include="../../$(QUERY)/$(PROJECT).Infrastructure.Persistence.Query.csproj" />
+    <ProjectReference Include="../../$(READ_MODEL)/$(PROJECT).Infrastructure.Persistence.ReadModel.csproj" />
     <ProjectReference Include="../../$(CACHE)/$(PROJECT).Infrastructure.Cache.csproj" />
-    <ProjectReference Include="../../$(HEALTH)/$(PROJECT).Infrastructure.Health.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Swashbuckle.AspNetCore" Version="11.0.1" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.15" />
+    <PackageReference Include="Scalar.AspNetCore" Version="3.2.0" />
+    <PackageReference Include="Serilog.AspNetCore" Version="11.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.15" />
+    <PackageReference Include="AspNetCore.HealthChecks.NpgSql" Version="9.0.0" />
+    <PackageReference Include="AspNetCore.HealthChecks.MongoDb" Version="9.0.0" />
+    <PackageReference Include="AspNetCore.HealthChecks.Redis" Version="9.0.0" />
+    <!-- Hangfire.Core chi co target netstandard2.0, keo Newtonsoft.Json 11.0.1 (NU1903); pin ban va -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <!-- dotnet ef can package nay o startup project; PrivateAssets de khong copy ra output -->
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.15">
       <PrivateAssets>all</PrivateAssets>
@@ -331,69 +418,74 @@ define API_CSPROJ :=
 </Project>
 endef
 
-define HEALTH_RESPONSE_WRITER :=
-using System.Text.Json;
-using Microsoft.Extensions.Diagnostics.HealthChecks;
-
-namespace $(PROJECT).Api.Health;
-
-internal static class HealthResponseWriter
-{
-    public static Task WriteAsync(HttpContext context, HealthReport report)
-    {
-        context.Response.ContentType = "application/json";
-        context.Response.Headers["Cache-Control"] = "no-store";
-
-        var body = JsonSerializer.Serialize(new { status = report.Status.ToString() });
-        return context.Response.WriteAsync(body);
-    }
-}
-endef
-
 define API_PROGRAM :=
 using $(PROJECT).Api;
-using $(PROJECT).Api.Health;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Scalar.AspNetCore;
+using Serilog;
 
-var builder = WebApplication.CreateBuilder(args);
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Console()
+    .CreateBootstrapLogger();
 
-builder.Services.AddControllers();
-builder.Services.AddSwaggerGen();
-builder.Services.AddApi(builder.Configuration);
-
-var app = builder.Build();
-
-if (app.Environment.IsDevelopment())
+try
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    var builder = WebApplication.CreateBuilder(args);
+
+    builder.Host.UseSerilog((context, services, configuration) => configuration
+        .ReadFrom.Configuration(context.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext());
+
+    builder.Services.AddControllers();
+    builder.Services.AddOpenApi();
+    builder.Services.AddApi(builder.Configuration);
+
+    var app = builder.Build();
+
+    app.UseSerilogRequestLogging();
+    app.UseExceptionHandler();
+    app.UseStatusCodePages();
+    app.UseAuthentication();
+    app.UseAuthorization();
+
+    if (app.Environment.IsDevelopment())
+    {
+        app.MapOpenApi();
+        app.MapScalarApiReference();
+    }
+
+    app.MapControllers();
+    app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+    app.MapHealthChecks("/health/ready", new HealthCheckOptions
+    {
+        Predicate = check => check.Tags.Contains("ready", StringComparer.Ordinal),
+    });
+
+    await app.RunAsync().ConfigureAwait(false);
 }
-
-app.MapControllers();
-
-app.MapHealthChecks("/health/live", new HealthCheckOptions
+catch (Exception ex)
 {
-    Predicate = _ => false,
-    ResponseWriter = HealthResponseWriter.WriteAsync,
-}).AllowAnonymous();
-
-app.MapHealthChecks("/health/ready", new HealthCheckOptions
+    Log.Fatal(ex, "Host terminated unexpectedly");
+    throw;
+}
+finally
 {
-    Predicate = registration => registration.Tags.Contains("ready"),
-    ResponseWriter = HealthResponseWriter.WriteAsync,
-}).AllowAnonymous();
-
-app.Run();
+    await Log.CloseAndFlushAsync().ConfigureAwait(false);
+}
 
 public partial class Program;
 endef
 
 define API_DI :=
+using System.Text;
 using $(PROJECT).Application;
 using $(PROJECT).Infrastructure.Cache;
-using $(PROJECT).Infrastructure.Health;
 using $(PROJECT).Infrastructure.Persistence;
-using $(PROJECT).Infrastructure.Persistence.Query;
+using $(PROJECT).Infrastructure.Persistence.ReadModel;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using MongoDB.Driver;
 
 namespace $(PROJECT).Api;
 
@@ -403,30 +495,141 @@ internal static class DependencyInjection
     {
         services.AddApplication();
         services.AddPersistence(configuration);
-        services.AddQuery(configuration);
+        services.AddReadModel(configuration);
         services.AddCache(configuration);
-        services.AddPlatformHealthChecks(configuration);
+        services.AddApiAuthentication(configuration);
+        services.AddApiHealthChecks(configuration);
+
+        services.AddProblemDetails();
+        services.AddExceptionHandler<ValidationExceptionHandler>();
 
         return services;
+    }
+
+    private static IServiceCollection AddApiAuthentication(this IServiceCollection services, IConfiguration configuration)
+    {
+        var signingKey = Required(configuration, "Jwt:SigningKey");
+
+        services
+            .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            .AddJwtBearer(options =>
+            {
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidIssuer = Required(configuration, "Jwt:Issuer"),
+                    ValidateAudience = true,
+                    ValidAudience = Required(configuration, "Jwt:Audience"),
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey)),
+                    ValidateLifetime = true,
+                    ClockSkew = TimeSpan.FromSeconds(30),
+                };
+            });
+
+        services.AddAuthorization();
+
+        return services;
+    }
+
+    private static IServiceCollection AddApiHealthChecks(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.AddHealthChecks()
+            .AddNpgSql(Required(configuration, "ConnectionStrings:WriteDb"), name: "postgres",
+                tags: new[] { "ready" }, timeout: TimeSpan.FromSeconds(3))
+            .AddMongoDb(provider => provider.GetRequiredService<IMongoClient>(), name: "mongo",
+                tags: new[] { "ready" }, timeout: TimeSpan.FromSeconds(3))
+            .AddRedis(Required(configuration, "ConnectionStrings:Redis"), name: "redis",
+                tags: new[] { "ready" }, timeout: TimeSpan.FromSeconds(3));
+
+        return services;
+    }
+
+    private static string Required(IConfiguration configuration, string key)
+        => configuration[key]
+           ?? throw new InvalidOperationException("Configuration '" + key + "' is not set.");
+}
+endef
+
+define VALIDATION_EXCEPTION_HANDLER :=
+using FluentValidation;
+using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
+
+namespace $(PROJECT).Api;
+
+internal sealed class ValidationExceptionHandler : IExceptionHandler
+{
+    public async ValueTask<bool> TryHandleAsync(
+        HttpContext httpContext,
+        Exception exception,
+        CancellationToken cancellationToken)
+    {
+        if (exception is not ValidationException validationException)
+        {
+            return false;
+        }
+
+        var errors = validationException.Errors
+            .GroupBy(failure => failure.PropertyName, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Select(failure => failure.ErrorMessage).ToArray(),
+                StringComparer.Ordinal);
+
+        var problem = new HttpValidationProblemDetails(errors)
+        {
+            Status = StatusCodes.Status400BadRequest,
+            Title = "One or more validation errors occurred.",
+        };
+
+        httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+
+        await httpContext.Response.WriteAsJsonAsync(
+            problem,
+            options: null,
+            contentType: "application/problem+json",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return true;
     }
 }
 endef
 
 define APPSETTINGS :=
 {
-  "ConnectionStrings": {
-    "WriteDb": "Host=localhost;Port=5432;Database=kasio;Username=postgres",
-    "ReadDb": "mongodb://localhost:27017",
-    "Redis": "localhost:6379"
+  "Redis": {
+    "InstanceName": "kasio:"
   },
-  "ReadDb": {
-    "Database": "kasio-read"
+  "Jwt": {
+    "Issuer": "kasio",
+    "Audience": "kasio-api"
   },
-  "Logging": {
-    "LogLevel": {
+  "Serilog": {
+    "MinimumLevel": {
       "Default": "Information",
-      "Microsoft.AspNetCore": "Warning"
-    }
+      "Override": {
+        "Microsoft.AspNetCore": "Warning",
+        "Microsoft.EntityFrameworkCore": "Warning"
+      }
+    },
+    "WriteTo": [
+      {
+        "Name": "Console",
+        "Args": {
+          "formatter": "Serilog.Formatting.Compact.CompactJsonFormatter, Serilog.Formatting.Compact"
+        }
+      },
+      {
+        "Name": "File",
+        "Args": {
+          "path": "logs/log-.txt",
+          "rollingInterval": "Day",
+          "retainedFileCountLimit": 7,
+          "formatter": "Serilog.Formatting.Compact.CompactJsonFormatter, Serilog.Formatting.Compact"
+        }
+      }
+    ]
   }
 }
 endef
@@ -439,7 +642,7 @@ define LAUNCH_SETTINGS :=
       "commandName": "Project",
       "dotnetRunMessages": true,
       "launchBrowser": true,
-      "launchUrl": "swagger",
+      "launchUrl": "scalar",
       "applicationUrl": "http://localhost:5080",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
@@ -451,10 +654,23 @@ endef
 
 define APPSETTINGS_DEV :=
 {
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft.AspNetCore": "Warning"
+  "ConnectionStrings": {
+    "WriteDb": "Host=localhost;Port=5432;Database=kasio;Username=postgres",
+    "Redis": "localhost:6379"
+  },
+  "Mongo": {
+    "ConnectionString": "mongodb://localhost:27017",
+    "Database": "kasio-read"
+  },
+  "Jwt": {
+    "SigningKey": "kasio-dev-signing-key-change-me-32-bytes"
+  },
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Debug",
+      "Override": {
+        "Microsoft.AspNetCore": "Warning"
+      }
     }
   }
 }
@@ -480,28 +696,6 @@ define TESTS_CSPROJ :=
 </Project>
 endef
 
-define INTEGRATION_TESTS_CSPROJ :=
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <IsPackable>false</IsPackable>
-    <IsTestProject>true</IsTestProject>
-  </PropertyGroup>
-  <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.2" />
-    <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.15" />
-    <PackageReference Include="Testcontainers.MongoDb" Version="4.17.0" />
-    <PackageReference Include="Testcontainers.PostgreSql" Version="4.17.0" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="../../$(API)/$(PROJECT).Api.csproj" />
-  </ItemGroup>
-</Project>
-endef
 
 define TESTS_CODE :=
 using FluentValidation;
@@ -573,11 +767,14 @@ ensure-dotnet:
 	fi
 
 dirs:
-	mkdir -p $(API)/Properties $(API)/Health $(APPLICATION)/Behaviors $(PERSISTENCE) $(QUERY) $(CACHE) $(HEALTH) $(DOMAIN) $(CONTRACTS) $(TESTS) $(INTEGRATION_TESTS)
+	mkdir -p $(API)/Properties $(APPLICATION)/Behaviors $(PERSISTENCE) $(READ_MODEL) $(CACHE) $(DOMAIN) $(CONTRACTS) $(TESTS)
 
 files: dirs
 	$(if $(wildcard .gitignore),,$(file >.gitignore,$(GITIGNORE)))
 	$(if $(wildcard Directory.Build.props),,$(file >Directory.Build.props,$(BUILD_PROPS)))
+	$(if $(wildcard .editorconfig),,$(file >.editorconfig,$(EDITORCONFIG)))
+	$(if $(wildcard global.json),,$(file >global.json,$(GLOBAL_JSON)))
+	$(if $(wildcard ARCHITECTURE.md),,$(file >ARCHITECTURE.md,$(ARCHITECTURE_DOC)))
 	$(if $(wildcard $(DOMAIN)/$(PROJECT).Domain.csproj),,$(file >$(DOMAIN)/$(PROJECT).Domain.csproj,$(DOMAIN_CSPROJ)))
 	$(if $(wildcard $(CONTRACTS)/$(PROJECT).Contracts.csproj),,$(file >$(CONTRACTS)/$(PROJECT).Contracts.csproj,$(CONTRACTS_CSPROJ)))
 	$(if $(wildcard $(APPLICATION)/$(PROJECT).Application.csproj),,$(file >$(APPLICATION)/$(PROJECT).Application.csproj,$(APPLICATION_CSPROJ)))
@@ -586,22 +783,19 @@ files: dirs
 	$(if $(wildcard $(PERSISTENCE)/$(PROJECT).Infrastructure.Persistence.csproj),,$(file >$(PERSISTENCE)/$(PROJECT).Infrastructure.Persistence.csproj,$(PERSISTENCE_CSPROJ)))
 	$(if $(wildcard $(PERSISTENCE)/DependencyInjection.cs),,$(file >$(PERSISTENCE)/DependencyInjection.cs,$(PERSISTENCE_DI)))
 	$(if $(wildcard $(PERSISTENCE)/$(PROJECT)DbContext.cs),,$(file >$(PERSISTENCE)/$(PROJECT)DbContext.cs,$(DB_CONTEXT)))
-	$(if $(wildcard $(QUERY)/$(PROJECT).Infrastructure.Persistence.Query.csproj),,$(file >$(QUERY)/$(PROJECT).Infrastructure.Persistence.Query.csproj,$(QUERY_CSPROJ)))
-	$(if $(wildcard $(QUERY)/DependencyInjection.cs),,$(file >$(QUERY)/DependencyInjection.cs,$(QUERY_DI)))
+	$(if $(wildcard $(READ_MODEL)/$(PROJECT).Infrastructure.Persistence.ReadModel.csproj),,$(file >$(READ_MODEL)/$(PROJECT).Infrastructure.Persistence.ReadModel.csproj,$(READ_MODEL_CSPROJ)))
+	$(if $(wildcard $(READ_MODEL)/DependencyInjection.cs),,$(file >$(READ_MODEL)/DependencyInjection.cs,$(READ_MODEL_DI)))
 	$(if $(wildcard $(CACHE)/$(PROJECT).Infrastructure.Cache.csproj),,$(file >$(CACHE)/$(PROJECT).Infrastructure.Cache.csproj,$(CACHE_CSPROJ)))
 	$(if $(wildcard $(CACHE)/DependencyInjection.cs),,$(file >$(CACHE)/DependencyInjection.cs,$(CACHE_DI)))
-	$(if $(wildcard $(HEALTH)/$(PROJECT).Infrastructure.Health.csproj),,$(file >$(HEALTH)/$(PROJECT).Infrastructure.Health.csproj,$(HEALTH_CSPROJ)))
-	$(if $(wildcard $(HEALTH)/DependencyInjection.cs),,$(file >$(HEALTH)/DependencyInjection.cs,$(HEALTH_DI)))
 	$(if $(wildcard $(API)/$(PROJECT).Api.csproj),,$(file >$(API)/$(PROJECT).Api.csproj,$(API_CSPROJ)))
 	$(if $(wildcard $(API)/Program.cs),,$(file >$(API)/Program.cs,$(API_PROGRAM)))
-	$(if $(wildcard $(API)/Health/HealthResponseWriter.cs),,$(file >$(API)/Health/HealthResponseWriter.cs,$(HEALTH_RESPONSE_WRITER)))
+	$(if $(wildcard $(API)/ValidationExceptionHandler.cs),,$(file >$(API)/ValidationExceptionHandler.cs,$(VALIDATION_EXCEPTION_HANDLER)))
 	$(if $(wildcard $(API)/DependencyInjection.cs),,$(file >$(API)/DependencyInjection.cs,$(API_DI)))
 	$(if $(wildcard $(API)/appsettings.json),,$(file >$(API)/appsettings.json,$(APPSETTINGS)))
 	$(if $(wildcard $(API)/appsettings.Development.json),,$(file >$(API)/appsettings.Development.json,$(APPSETTINGS_DEV)))
 	$(if $(wildcard $(API)/Properties/launchSettings.json),,$(file >$(API)/Properties/launchSettings.json,$(LAUNCH_SETTINGS)))
 	$(if $(wildcard $(TESTS)/$(PROJECT).UnitTests.csproj),,$(file >$(TESTS)/$(PROJECT).UnitTests.csproj,$(TESTS_CSPROJ)))
 	$(if $(wildcard $(TESTS)/ValidationBehaviorTests.cs),,$(file >$(TESTS)/ValidationBehaviorTests.cs,$(TESTS_CODE)))
-	$(if $(wildcard $(INTEGRATION_TESTS)/$(PROJECT).IntegrationTests.csproj),,$(file >$(INTEGRATION_TESTS)/$(PROJECT).IntegrationTests.csproj,$(INTEGRATION_TESTS_CSPROJ)))
 	printf '  files ready\n'
 
 solution: files
