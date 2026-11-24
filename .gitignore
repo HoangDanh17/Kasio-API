@@ -1,0 +1,35 @@
+# Build output
+bin/
+obj/
+artifacts/
+[Dd]ebug/
+[Rr]elease/
+*.trx
+TestResults/
+*.coverage
+*.coveragexml
+
+# IDE
+.idea/
+.vs/
+.vscode/
+*.user
+*.suo
+*.DotSettings.user
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+
+# Local overrides and secrets
+appsettings.*.local.json
+*.pfx
+*.snk
+.env
+.env.*
+
+# Logs and OS noise
+*.log
+.DS_Store
+Thumbs.db
