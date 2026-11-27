@@ -4,7 +4,8 @@
 ## Get latest from `dotnet new gitignore`
 
 # dotenv files
-.env
+.env.*
+!.env.example
 
 # User-specific files
 *.rsuser
@@ -488,6 +489,10 @@ $RECYCLE.BIN/
 # Local config overrides (real secrets go here, never in committed settings)
 appsettings.*.local.json
 docker-compose.override.yml
+
+# Local environment files (docker compose substitution / local secrets)
+.env
+!.env.example
 
 # Serilog file sink output
 logs/
