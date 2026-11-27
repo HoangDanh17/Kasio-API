@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../Kasio.Application/Kasio.Application.csproj" />
+    <ProjectReference Include="..\Kasio.Contracts\Kasio.Contracts.csproj" />
+    <ProjectReference Include="..\Kasio.Domain\Kasio.Domain.csproj" />
+    <ProjectReference Include="..\Kasio.Infrastructure.Persistence.ReadModel\Kasio.Infrastructure.Persistence.ReadModel.csproj" />
+    <ProjectReference Include="..\Kasio.Infrastructure.Persistence\Kasio.Infrastructure.Persistence.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.15" />
+    <PackageReference Include="StackExchange.Redis" Version="3.4.35" />
+  </ItemGroup>
+</Project>

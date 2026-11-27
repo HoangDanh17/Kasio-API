@@ -1,0 +1,10 @@
+using Kasio.Domain.Common;
+using Kasio.Domain.Permissions;
+
+namespace Kasio.Domain.Roles.Events;
+
+public sealed record class RolePermissionRemovedDomainEvent
+    (RoleId RoleId, PermissionId PermissionId, DateTime OccurredOnUtc) : IDomainEvent
+{
+    public string EventType => RoleEventTypes.RolePermissionRemoved;
+}

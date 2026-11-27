@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="../../src/Kasio.Application/Kasio.Application.csproj" />
+    <ProjectReference Include="../../src/Kasio.Infrastructure.Persistence/Kasio.Infrastructure.Persistence.csproj" />
+    <ProjectReference Include="../../src/Kasio.Infrastructure.Persistence.ReadModel/Kasio.Infrastructure.Persistence.ReadModel.csproj" />
+    <ProjectReference Include="../../src/Kasio.Infrastructure.Cache/Kasio.Infrastructure.Cache.csproj" />
+    <ProjectReference Include="..\..\src\Kasio.Contracts\Kasio.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\Kasio.Domain\Kasio.Domain.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.15" />
+    <PackageReference Include="Scalar.AspNetCore" Version="3.2.0" />
+    <PackageReference Include="Serilog.AspNetCore" Version="11.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.15" />
+    <PackageReference Include="AspNetCore.HealthChecks.NpgSql" Version="9.0.0" />
+    <PackageReference Include="AspNetCore.HealthChecks.MongoDb" Version="9.0.0" />
+    <PackageReference Include="AspNetCore.HealthChecks.Redis" Version="9.0.0" />
+    <!-- Hangfire.Core chi co target netstandard2.0, keo Newtonsoft.Json 11.0.1 (NU1903); pin ban va -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <!-- dotnet ef can package nay o startup project; PrivateAssets de khong copy ra output -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.15">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="DotNetCore.CAP" Version="10.0.2" />
+    <PackageReference Include="DotNetCore.CAP.RabbitMQ" Version="10.0.2" />
+    <PackageReference Include="DotNetCore.CAP.PostgreSql" Version="10.0.2" />
+    <PackageReference Include="Hangfire.AspNetCore" Version="1.8.25" />
+    <PackageReference Include="Hangfire.PostgreSql" Version="1.21.1" />
+  </ItemGroup>
+</Project>

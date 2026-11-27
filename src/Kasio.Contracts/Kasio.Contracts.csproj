@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Kasio.Domain\Kasio.Domain.csproj" />
+  </ItemGroup>
+</Project>
